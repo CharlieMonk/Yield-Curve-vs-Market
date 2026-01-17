@@ -17,16 +17,16 @@ DEFAULT_START_DATE = datetime(1960, 1, 1)
 DEFAULT_CACHE_DIR = "data_cache"
 
 
-def load_or_download(cache_file, download_func, description, cache_dir=DEFAULT_CACHE_DIR):
+def load_or_download(cache_file, download_func, description, cache_dir=DEFAULT_CACHE_DIR, verbose=True):
     """Load from cache if exists, otherwise download and cache."""
     os.makedirs(cache_dir, exist_ok=True)
     cache_path = os.path.join(cache_dir, cache_file)
     if os.path.exists(cache_path):
-        print(f"  Loading {description} from cache...")
         with open(cache_path, 'rb') as f:
             return pickle.load(f)
     else:
-        print(f"  Downloading {description}...")
+        if verbose:
+            print(f"  Downloading {description}...")
         data = download_func()
         with open(cache_path, 'wb') as f:
             pickle.dump(data, f)
@@ -72,12 +72,59 @@ def get_inversion_periods(df, spread_col='Yield Spread'):
     return periods
 
 
+def enable_unified_spikeline(fig, num_rows, date_range, spike_color='rgba(255, 255, 255, 0.5)'):
+    """
+    Enable spike lines that span all subplots in a multi-row figure.
+
+    This is a workaround for Plotly 4.0+ where make_subplots creates separate
+    x-axes, preventing spike lines from spanning all subplots.
+    See: https://github.com/plotly/plotly.py/issues/1677
+
+    Args:
+        fig: Plotly figure with subplots
+        num_rows: Number of subplot rows
+        date_range: Tuple of (min_date, max_date) for x-axis range
+        spike_color: Color for the spike line
+    """
+    # Bind all traces to the bottom x-axis
+    fig.update_traces(xaxis=f'x{num_rows}')
+
+    # Add invisible traces to upper axes to force tick label rendering
+    # (Plotly won't render tick labels for axes with no bound traces)
+    for row in range(1, num_rows):
+        fig.add_trace(go.Scatter(
+            x=list(date_range),
+            y=[0, 0],
+            mode='markers',
+            marker=dict(opacity=0),
+            showlegend=False,
+            hoverinfo='skip',
+            xaxis=f'x{row}' if row > 1 else 'x',
+            yaxis=f'y{row}' if row > 1 else 'y'
+        ))
+
+    # Sync upper x-axes to bottom x-axis so they zoom together and align labels
+    bottom_xaxis = f'x{num_rows}'
+    for row in range(1, num_rows):
+        fig.update_xaxes(row=row, col=1, matches=bottom_xaxis)
+
+    # Apply spike settings to all x-axes
+    spike_settings = dict(
+        showspikes=True,
+        spikemode='across',
+        spikesnap='cursor',
+        spikecolor=spike_color,
+        spikethickness=1,
+        spikedash='dot',
+    )
+    fig.update_xaxes(**spike_settings)
+
+
 def load_nasdaq_data(start_date=None, end_date=None, cache_dir=DEFAULT_CACHE_DIR):
     """Load NASDAQ data, downloading if not cached."""
     start_date = start_date or DEFAULT_START_DATE
     end_date = end_date or datetime.now()
 
-    print("Loading NASDAQ data...")
     def download():
         data = yf.download("^IXIC", start=start_date, end=end_date, progress=False)
         if isinstance(data.columns, pd.MultiIndex):
@@ -96,7 +143,6 @@ def load_sp500_data(start_date=None, end_date=None, cache_dir=DEFAULT_CACHE_DIR)
     start_date = start_date or DEFAULT_START_DATE
     end_date = end_date or datetime.now()
 
-    print("Loading S&P 500 data...")
     def download():
         data = yf.download("^GSPC", start=start_date, end=end_date, progress=False)
         if isinstance(data.columns, pd.MultiIndex):
@@ -115,7 +161,6 @@ def load_gold_silver_data(start_date=None, end_date=None, cache_dir=DEFAULT_CACH
     start_date = start_date or DEFAULT_START_DATE
     end_date = end_date or datetime.now()
 
-    print("Loading Gold and Silver data...")
     wb_file = os.path.join(cache_dir, "CMO-Historical-Data-Monthly.xlsx")
     wb_url = "https://thedocs.worldbank.org/en/doc/5d903e848db1d1b83e0ec8f744e55570-0350012021/related/CMO-Historical-Data-Monthly.xlsx"
 
@@ -127,11 +172,9 @@ def load_gold_silver_data(start_date=None, end_date=None, cache_dir=DEFAULT_CACH
     try:
         # Load World Bank historical data
         if not os.path.exists(wb_file):
-            print("  Downloading World Bank data...")
+            print("  Downloading World Bank commodity data...")
             os.makedirs(cache_dir, exist_ok=True)
             urllib.request.urlretrieve(wb_url, wb_file)
-        else:
-            print("  Loading World Bank data from cache...")
 
         wb_data = pd.read_excel(wb_file, sheet_name='Monthly Prices', header=4)
         wb_data = wb_data.iloc[1:]  # Skip the units row
@@ -141,10 +184,8 @@ def load_gold_silver_data(start_date=None, end_date=None, cache_dir=DEFAULT_CACH
         wb_gold = pd.to_numeric(wb_data['Gold'], errors='coerce')
         wb_silver = pd.to_numeric(wb_data['Silver'], errors='coerce')
         wb_end_date = wb_gold.dropna().index[-1]
-        print(f"  World Bank data: 1960-01 to {wb_end_date.strftime('%Y-%m')}")
 
         # Get recent data from Yahoo Finance to fill the gap
-        print("  Fetching recent Gold/Silver from Yahoo Finance...")
 
         def download_yf_gold():
             data = yf.download("GC=F", start=wb_end_date, end=end_date, progress=False)
@@ -183,9 +224,6 @@ def load_gold_silver_data(start_date=None, end_date=None, cache_dir=DEFAULT_CACH
         gold_pct = gold_monthly.pct_change(periods=6) * 100
         silver_pct = silver_monthly.pct_change(periods=6) * 100
 
-        print(f"  Gold: {gold_monthly.dropna().index[0].strftime('%Y-%m')} to {gold_monthly.dropna().index[-1].strftime('%Y-%m')} ({len(gold_monthly.dropna())} points)")
-        print(f"  Silver: {silver_monthly.dropna().index[0].strftime('%Y-%m')} to {silver_monthly.dropna().index[-1].strftime('%Y-%m')} ({len(silver_monthly.dropna())} points)")
-
         return gold_monthly, gold_pct, silver_monthly, silver_pct
 
     except Exception as e:
@@ -198,7 +236,6 @@ def load_yield_data(start_date=None, end_date=None, cache_dir=DEFAULT_CACHE_DIR)
     start_date = start_date or DEFAULT_START_DATE
     end_date = end_date or datetime.now()
 
-    print("Loading yield curve data from FRED...")
     def download():
         series = {'DGS2': '2Y Treasury', 'DGS10': '10Y Treasury', 'DGS3MO': '3M Treasury', 'DGS30': '30Y Treasury'}
         data = {}
@@ -206,12 +243,11 @@ def load_yield_data(start_date=None, end_date=None, cache_dir=DEFAULT_CACHE_DIR)
             try:
                 df = web.DataReader(series_id, 'fred', start_date, end_date)
                 data[name] = df[series_id]
-                print(f"    {name}: {df.index[0].strftime('%Y-%m-%d')} to {df.index[-1].strftime('%Y-%m-%d')}")
             except Exception as e:
-                print(f"    Warning: Could not download {name}: {e}")
+                print(f"  Warning: Could not download {name}: {e}")
         return pd.DataFrame(data)
 
-    yields_df = load_or_download("yields.pkl", download, "Treasury yields", cache_dir)
+    yields_df = load_or_download("yields.pkl", download, "Treasury yields from FRED", cache_dir)
     yields_df['10Y-2Y Spread'] = yields_df['10Y Treasury'] - yields_df['2Y Treasury']
     yields_df['10Y-3M Spread'] = yields_df['10Y Treasury'] - yields_df['3M Treasury']
     yields_monthly = yields_df.resample('ME').last()
@@ -223,12 +259,11 @@ def load_recession_data(start_date=None, end_date=None, cache_dir=DEFAULT_CACHE_
     start_date = start_date or DEFAULT_START_DATE
     end_date = end_date or datetime.now()
 
-    print("Loading recession data from FRED...")
     def download():
         return web.DataReader('USREC', 'fred', start_date, end_date)
 
     try:
-        recessions = load_or_download("recessions.pkl", download, "recession indicators", cache_dir)
+        recessions = load_or_download("recessions.pkl", download, "recession data from FRED", cache_dir)
         recessions_monthly = recessions.resample('ME').max()
         return recessions, recessions_monthly
     except Exception as e:
@@ -242,6 +277,7 @@ def load_all_data(start_date=None, end_date=None, cache_dir=DEFAULT_CACHE_DIR):
     end_date = end_date or datetime.now()
 
     os.makedirs(cache_dir, exist_ok=True)
+    print("Loading data (from cache if available)...")
 
     # Load all data sources
     nasdaq, nasdaq_monthly, nasdaq_pct = load_nasdaq_data(start_date, end_date, cache_dir)
@@ -267,15 +303,6 @@ def load_all_data(start_date=None, end_date=None, cache_dir=DEFAULT_CACHE_DIR):
 
     combined = combined.dropna(subset=['NASDAQ 6M %', 'Yield Spread'])
 
-    # Print summary
-    print(f"\nData summary:")
-    print(f"  NASDAQ: {nasdaq.index[0].strftime('%Y-%m-%d')} to {nasdaq.index[-1].strftime('%Y-%m-%d')} ({len(nasdaq_monthly)} monthly)")
-    print(f"  S&P 500: {sp500.index[0].strftime('%Y-%m-%d')} to {sp500.index[-1].strftime('%Y-%m-%d')} ({len(sp500_monthly)} monthly)")
-    if len(gold_monthly.dropna()) > 0:
-        print(f"  Gold: {gold_monthly.dropna().index[0].strftime('%Y-%m')} to {gold_monthly.dropna().index[-1].strftime('%Y-%m')} ({len(gold_monthly.dropna())} monthly)")
-        print(f"  Silver: {silver_monthly.dropna().index[0].strftime('%Y-%m')} to {silver_monthly.dropna().index[-1].strftime('%Y-%m')} ({len(silver_monthly.dropna())} monthly)")
-    print(f"  Yields: {yields_df.index[0].strftime('%Y-%m-%d')} to {yields_df.index[-1].strftime('%Y-%m-%d')}")
-    print(f"\nCombined data range: {combined.index[0].strftime('%Y-%m-%d')} to {combined.index[-1].strftime('%Y-%m-%d')}")
-    print(f"Total data points: {len(combined)} months")
+    print(f"Loaded {len(combined)} months of data ({combined.index[0].strftime('%Y-%m')} to {combined.index[-1].strftime('%Y-%m')})")
 
     return combined
